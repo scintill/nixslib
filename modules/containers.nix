@@ -2,11 +2,12 @@
 let inherit (lib) mkIf mkMerge mkOption;
 inherit (lib) types mapAttrsToList mapAttrs' nameValuePair;
 hostConfig = config;
+allContainerNames = builtins.attrNames hostConfig.nixslib.containers;
 in
 {
   config = {
     containers = mapAttrs' (name: containerOptions:
-      # Typically this nameValuePair will map to `name`, but I put it here to force the evaluation
+      # This nameValuePair should map to `name` anyway, but I put it here to force the evaluation
       # of _hostAddressToContainerName so that conflicts will be discovered.
       nameValuePair hostConfig.nixslib._hostAddressToContainerName.${containerOptions.hostAddress} {
         autoStart = true;
@@ -28,12 +29,37 @@ in
         }) containerOptions.rwStraightMounts;
     }) hostConfig.nixslib.containers;
 
-    networking.nat = mkMerge (lib.mapAttrsToList (name: containerOptions:
-      mkIf containerOptions.allowEgress {
-        enable = true;
-        internalInterfaces = ["ve-${name}"];
-      }
-    ) hostConfig.nixslib.containers);
+    networking =
+      mkMerge (lib.mapAttrsToList (name: containerOptions:
+        let forbiddenContainerNames = lib.subtractLists (containerOptions.allowNetworkToOtherContainers ++ [ name ]) allContainerNames;
+        in
+        mkIf containerOptions.allowEgress {
+          nat = {
+            enable = true;
+            internalInterfaces = [ "ve-${name}" ];
+          };
+          firewall = {
+            extraCommands =
+              ''
+                # Allow existing connections
+                iptables -w -A FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+              '' +
+              lib.concatMapStrings (forbiddenContainerName: ''
+                # Disallow connections to other containers
+                iptables -w -A FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse
+                iptables -w -A FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse
+              '') forbiddenContainerNames;
+            extraStopCommands =
+              ''
+                iptables -w -D FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+              '' +
+              lib.concatMapStrings (forbiddenContainerName: ''
+                iptables -w -D FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse 2>/dev/null || true
+                iptables -w -D FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse 2>/dev/null || true
+              '') forbiddenContainerNames;
+          };
+        }
+      ) hostConfig.nixslib.containers);
 
     # Track IP addresses, to detect conflicts.
     nixslib._hostAddressToContainerName = mkMerge (lib.mapAttrsToList (name: containerOptions: {
@@ -48,13 +74,18 @@ in
         {
           options = {
             rwStraightMounts = mkOption {
-              type = types.listOf types.str;
+              type = with types; listOf str;
               default = [];
             };
 
             allowEgress = mkOption {
               type = types.bool;
               default = false;
+            };
+
+            allowNetworkToOtherContainers = mkOption {
+              type = with types; listOf str;
+              default = [];
             };
 
             localAddress = mkOption {
