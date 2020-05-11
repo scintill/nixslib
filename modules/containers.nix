@@ -22,11 +22,17 @@ in
           };
         };
 
-        bindMounts = map (path: {
-          hostPath = path;
-          mountPoint = path;
-          isReadOnly = false;
-        }) containerOptions.rwStraightMounts;
+        bindMounts =
+          (map (path: {
+            hostPath = path;
+            mountPoint = path;
+            isReadOnly = false;
+          }) containerOptions.rwStraightMounts) ++
+          (map (path: {
+            hostPath = path;
+            mountPoint = path;
+            isReadOnly = true;
+          }) containerOptions.roStraightMounts);
     }) hostConfig.nixslib.containers;
 
     networking =
@@ -74,6 +80,11 @@ in
         {
           options = {
             rwStraightMounts = mkOption {
+              type = with types; listOf str;
+              default = [];
+            };
+
+            roStraightMounts = mkOption {
               type = with types; listOf str;
               default = [];
             };
