@@ -20,6 +20,7 @@ in
             useHostResolvConf = false;
             nameservers = builtins.filter (n: n != "127.0.0.1") hostConfig.networking.nameservers;
           };
+          time.timeZone = hostConfig.time.timeZone;
         };
 
         bindMounts =
