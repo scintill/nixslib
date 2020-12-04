@@ -19,6 +19,7 @@ in
           networking = {
             useHostResolvConf = false;
             nameservers = builtins.filter (n: n != "127.0.0.1") hostConfig.networking.nameservers;
+            firewall.allowedTCPPorts = containerOptions.forwardTCPPorts;
           };
           time.timeZone = hostConfig.time.timeZone;
         };
@@ -40,32 +41,38 @@ in
       mkMerge (lib.mapAttrsToList (name: containerOptions:
         let forbiddenContainerNames = lib.subtractLists (containerOptions.allowNetworkToOtherContainers ++ [ name ]) allContainerNames;
         in
-        mkIf containerOptions.allowEgress {
-          nat = {
-            enable = true;
-            internalInterfaces = [ "ve-${name}" ];
-          };
-          firewall = {
-            extraCommands =
-              ''
-                # Allow existing connections
-                iptables -w -A FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-              '' +
-              lib.concatMapStrings (forbiddenContainerName: ''
-                # Disallow connections to other containers
-                iptables -w -A FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse
-                iptables -w -A FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse
-              '') forbiddenContainerNames;
-            extraStopCommands =
-              ''
-                iptables -w -D FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-              '' +
-              lib.concatMapStrings (forbiddenContainerName: ''
-                iptables -w -D FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse 2>/dev/null || true
-                iptables -w -D FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse 2>/dev/null || true
-              '') forbiddenContainerNames;
-          };
-        }
+        mkMerge [
+          (mkIf containerOptions.allowEgress {
+            nat = {
+              enable = true;
+              internalInterfaces = [ "ve-${name}" ];
+            };
+            firewall = {
+              extraCommands =
+                ''
+                  # Allow existing connections
+                  iptables -w -A FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+                '' +
+                lib.concatMapStrings (forbiddenContainerName: ''
+                  # Disallow connections to other containers
+                  iptables -w -A FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse
+                  iptables -w -A FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse
+                '') forbiddenContainerNames;
+              extraStopCommands =
+                ''
+                  iptables -w -D FORWARD -o ve-${name} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+                '' +
+                lib.concatMapStrings (forbiddenContainerName: ''
+                  iptables -w -D FORWARD -i ve-${name} -o ve-${forbiddenContainerName} -j nixos-fw-log-refuse 2>/dev/null || true
+                  iptables -w -D FORWARD -i ve-${name} --dst ${hostConfig.nixslib.containers.${forbiddenContainerName}.localAddress} -j nixos-fw-log-refuse 2>/dev/null || true
+                '') forbiddenContainerNames;
+            };
+          })
+          {
+            nat.forwardPorts = map (port: { sourcePort = port; destination = containerOptions.localAddress; }) containerOptions.forwardTCPPorts;
+            firewall.allowedTCPPorts = containerOptions.forwardTCPPorts;
+          }
+        ]
       ) hostConfig.nixslib.containers);
 
     # Track IP addresses, to detect conflicts.
@@ -106,6 +113,11 @@ in
 
             hostAddress = mkOption {
               type = types.str;
+            };
+
+            forwardTCPPorts = mkOption {
+              type = with types; listOf int;
+              default = [];
             };
           };
         }
